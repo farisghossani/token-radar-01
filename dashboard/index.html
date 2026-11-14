@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<a class="skip" href="#board">Skip to the board</a>
+
+<header class="masthead">
+  <div class="wrap brandrow">
+    <span class="mark" aria-hidden="true">
+      <svg viewBox="0 0 36 36" width="34" height="34">
+        <circle cx="18" cy="18" r="15" fill="none" stroke="currentColor" stroke-opacity=".22"/>
+        <circle cx="18" cy="18" r="9.5" fill="none" stroke="currentColor" stroke-opacity=".42"/>
+        <circle cx="18" cy="18" r="4" fill="none" stroke="currentColor" stroke-opacity=".68"/>
+        <path d="M18 18 30.5 11.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <circle cx="18" cy="18" r="2.1" fill="currentColor"/>
+        <circle cx="28.2" cy="12.4" r="2.3" fill="currentColor"/>
+      </svg>
+    </span>
+    <div class="brandtext">
+      <h1>Token Radar</h1>
+      <p class="lede">Protocols whose record carries no token, ranked by the value a launch would imply — every number read out of the sealed snapshot, nothing fetched, nothing guessed.</p>
+    </div>
+    <dl class="prov" id="prov"></dl>
+  </div>
+  <div class="tiles"><div class="wrap tilesgrid" id="tiles"></div></div>
+</header>
+
+<main>
+  <section class="wrap controls" aria-label="Board controls">
+    <div class="ctl grow">
+      <label class="lbl" for="q">Search</label>
+      <input id="q" type="search" placeholder="protocol, slug, chain or category" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="ctl">
+      <label class="lbl" for="cat">Category</label>
+      <select id="cat"></select>
+    </div>
+    <div class="ctl">
+      <label class="lbl" for="chain">Chain</label>
+      <select id="chain"></select>
+    </div>
+    <div class="ctl">
+      <label class="lbl" for="min">Min TVL</label>
+      <select id="min"></select>
+    </div>
+    <div class="ctl">
+      <label class="lbl" for="sort">Sort by</label>
+      <select id="sort"></select>
+    </div>
+    <label class="toggle" for="wl">
+      <input type="checkbox" id="wl">
+      <span>Watchlist only</span>
+    </label>
+    <button type="button" class="btn" id="reset">Reset</button>
+    <p class="count" id="count" role="status" aria-live="polite"></p>
+    <ul class="chips" id="chips"></ul>
+  </section>
+
+  <section class="wrap" id="board" aria-label="The board">
+    <div class="sechead">
+      <h2>The board</h2>
+      <p id="boardnote"></p>
+    </div>
+    <div class="tablewrap" id="boardwrap">
+      <table class="board">
+        <thead>
+          <tr>
+            <th class="c-rank num">Rank</th>
+            <th class="c-name"><button type="button" class="thb" data-sort="name">Protocol</button></th>
+            <th class="c-cat"><button type="button" class="thb" data-sort="category">Category</button></th>
+            <th class="c-tvl num"><button type="button" class="thb" data-sort="tvl">TVL</button></th>
+            <th class="c-7d num"><button type="button" class="thb" data-sort="growth">7d</button></th>
+            <th class="c-age num"><button type="button" class="thb" data-sort="age">Tokenless age</button></th>
+            <th class="c-imp num"><button type="button" class="thb" data-sort="implied">Implied value</button></th>
+            <th class="c-act"><span class="sr">Farm plan</span></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" hidden>
+      <p class="etitle">No protocol matches this filter</p>
+      <p class="ebody">The board holds <span id="etotal"></span> screened protocols. Widen the search, drop the minimum TVL, or clear the watchlist switch.</p>
+      <button type="button" class="btn" id="ereset">Reset the filter</button>
+    </div>
+  </section>
+
+  <section class="wrap" id="method" aria-label="How the board is built">
+    <div class="sechead">
+      <h2>How the board is built</h2>
+      <p>Every implied value is four measured numbers multiplied together. This page states them, so a reader can recompute any row by hand and disagree with it if they want to.</p>
+    </div>
+    <p class="formula">implied = round( TVL × multiple × growthAdj × maturity )</p>
+    <div class="mgrid">
+      <article class="card">
+        <h3>The four factors</h3>
+        <dl class="consts" id="consts"></dl>
+      </article>
+      <article class="card">
+        <h3>What the screen keeps, and what it drops</h3>
+        <p class="body" id="screen"></p>
+        <p class="body muted" id="calnote"></p>
+      </article>
+    </div>
+    <div class="sechead sub">
+      <h3>Calibration — the multiples, measured on this snapshot</h3>
+      <p>For every protocol in the snapshot that already records a token, the ratio is its market cap over its TVL. A category's multiple is the median of those ratios; a category with fewer than three observations falls back to the global median. The board's own protocols are absent from this table by construction: they record no token, so they have no ratio.</p>
+    </div>
+    <div class="tablewrap">
+      <table class="cal">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th class="num">Protocols that trade</th>
+            <th class="num">Median mcap / TVL</th>
+            <th>Applied to</th>
+          </tr>
+        </thead>
+        <tbody id="calib"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wrap" id="live" aria-label="Protocols that already trade">
+    <div class="sechead">
+      <h2>Already trading — set aside</h2>
+      <p id="livesub"></p>
+    </div>
+    <div class="tablewrap tall">
+      <table class="live">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Protocol</th>
+            <th>Category</th>
+            <th class="num">TVL</th>
+            <th class="num">Market cap</th>
+            <th class="num">mcap / TVL</th>
+          </tr>
+        </thead>
+        <tbody id="liverows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <p id="footnote"></p>
+  <p class="muted">One local script (<span class="mono">data.js</span>, written by the entrypoint from the same board) is loaded beside this page. The page makes no request of any kind, and it renders the same bytes on every load: no clock, no random source.</p>
+</footer>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<aside class="detail" id="detail" aria-labelledby="dtitle" aria-modal="true" role="dialog" hidden>
+  <div class="dbar">
+    <p class="dkick" id="dkick"></p>
+    <button type="button" class="btn ghost" id="dclose">Close</button>
+  </div>
+  <h2 id="dtitle"></h2>
+  <p class="dsub" id="dsub"></p>
+  <div class="dgrid">
+    <div class="dcol">
+      <h3 class="dh">The implied value, factor by factor</h3>
+      <table class="factors"><tbody id="dfactors"></tbody></table>
+      <p class="dnote" id="dcalc"></p>
+      <h3 class="dh">The protocol, as the snapshot records it</h3>
+      <dl class="facts" id="dfacts"></dl>
+      <p class="dnote" id="dnotetoken"></p>
+    </div>
+    <div class="dcol">
+      <h3 class="dh">How to farm it</h3>
+      <p class="dlead" id="dlead"></p>
+      <ol class="plan" id="dplan"></ol>
+      <p class="dnote">Costs and times are the plan's own estimates, stated per step. Nothing here is a promise of a token: the board ranks a record, and a record can change.</p>
+    </div>
+  </div>
+</aside>
+
+<noscript>
+  <p class="wrap">This page builds the board in the browser from <span class="mono">data.js</span>; it needs JavaScript, and it still loads no file but the one beside it.</p>
+</noscript>
+
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

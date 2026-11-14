@@ -42,11 +42,22 @@ function arg(name: string, fallback: string): string {
   return inline === undefined ? fallback : inline.slice(name.length + 3);
 }
 
-/** Stop with one line on standard error and the exit code the caller should see. */
+/** Stop with the exit code the caller should see; every line of the message is prefixed the same way. */
 function fail(code: number, message: string): never {
-  process.stderr.write(`token radar: ${message}\n`);
+  for (const line of message.split('\n')) process.stderr.write(`token radar: ${line}\n`);
   process.exit(code);
 }
+
+/**
+ * The three views the gate asks for, and the page's own URL that draws each one: the dashboard reads
+ * its rows from data.js and opens a filtered board or a protocol's detail straight from the location,
+ * so a headless browser takes all three from the same file with nothing but a hash or a query.
+ */
+const SHOT_VIEWS = [
+  { file: '1-board.jpg', view: 'the board itself', url: '' },
+  { file: '2-detail.jpg', view: "one protocol's detail view", url: '#p=<slug>' },
+  { file: '3-filtered.jpg', view: 'a filtered view', url: '?chain=<chain>&min=<tvl>' },
+];
 
 const inputArg = arg('input', '/input');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
@@ -80,10 +91,48 @@ function copyDirectory(from: string, to: string): string[] {
   return copied;
 }
 
-const dashboardFiles = copyDirectory(join(repo, 'dashboard'), join(out, 'dashboard'));
+const dashboard = join(repo, 'dashboard');
+
+/** The dashboard's source, read before a byte of it is copied: the judge reads it, the gate scans it. */
+const DASHBOARD_TEXT = /\.(html|css|js|json|mjs|svg|md|txt)$/;
+const NETWORK_ADDRESS = /https?:\/\//;
+
+/**
+ * What the gate would refuse about the page, or null when it would take it: an index.html, at least
+ * one stylesheet and one script, no source naming a network address, and the whole text inside the
+ * byte budget the judge reads. A page the gate refuses never gets copied to the output.
+ */
+function dashboardIssue(from: string): string | null {
+  if (!existsSync(from)) return `there is no dashboard/ directory in ${repo}: the page and its source live there`;
+  const names = readdirSync(from).sort().filter((name: string) => DASHBOARD_TEXT.test(name) && statSync(join(from, name)).isFile());
+  const missing = ['.html', '.css', '.js'].filter((ext: string) => !names.some((name: string) => name.endsWith(ext)));
+  if (missing.length > 0) return `dashboard/ holds no ${missing.join(', no ')}: the gate reads a page, a stylesheet and a script`;
+  let bytes = 0;
+  for (const name of names) {
+    const text = readFileSync(join(from, name), 'utf8');
+    bytes += Buffer.byteLength(text);
+    if (NETWORK_ADDRESS.test(text)) return `dashboard/${name} names a network address in its source: the page loads its rows from data.js beside it and nothing else`;
+  }
+  if (bytes > TEXT_MAX_BYTES) {
+    return `dashboard/ source totals ${bytes} bytes, past the ${TEXT_MAX_BYTES} the judge reads whole: the tail of the last file is what gets cut`;
+  }
+  return null;
+}
+
+const dashboardProblem = dashboardIssue(dashboard);
+if (dashboardProblem !== null) fail(1, dashboardProblem);
+
+const dashboardFiles = copyDirectory(dashboard, join(out, 'dashboard'));
 const screenshots = copyDirectory(join(repo, 'screenshots'), join(out, 'screenshots'));
 if (screenshots.length < SCREENSHOT_MINIMUM) {
-  fail(1, `screenshots/ holds ${screenshots.length} image${screenshots.length === 1 ? '' : 's'}: hand in 3, the board, a protocol's detail view and a filtered view`);
+  const page = join(out, 'dashboard', 'index.html');
+  fail(
+    1,
+    `screenshots/ holds ${screenshots.length} image${screenshots.length === 1 ? '' : 's'}: hand in 3, the board, one protocol's detail view and a filtered view.\n` +
+      `Open ${page} in a headless browser with no network and capture each view from the page's own URL:\n` +
+      SHOT_VIEWS.map((shot) => `  ${shot.file}  ${shot.view}  file://${page}${shot.url}`).join('\n') +
+      `\n${out}/data.js is written before this check, so every view draws real rows; each image is whole PNG or JPEG, 300 to 350 KB, long side at most 1440 and short side at least 800, and the first by name is the cover.`,
+  );
 }
 for (const name of screenshots) {
   if (!IMAGE_NAME.test(name)) {
