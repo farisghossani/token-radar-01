@@ -29,23 +29,38 @@
 // A protocol that records no token has no market cap of its own, so its implied value is built from the
 // three facts the snapshot does carry. The first is its TVL, scaled by what the market already pays for
 // the same kind of protocol: the multiple is the median market-cap-to-TVL ratio of the protocols that
-// record a token, taken for the row's own category when that category has at least three live-token
-// protocols to measure and from the whole set otherwise. Both medians are computed from the snapshot on
-// the run, so the multiples are a reading of this data and never a table someone typed. The second fact
-// is the protocol's seven-day TVL change, which says how much the record is currently worth to users: a
-// drawdown is weighted a little more heavily than the same rise, because money leaving a protocol is a
-// bigger warning than money arriving is a bonus. The third is how long the protocol has run with no
-// token, which is what a launch would reward.
+// record a token, taken for the row's own category when that category has at least four such protocols
+// inside the measurement window, and from the whole set otherwise. The second fact is the protocol's
+// seven-day TVL change, which says how much the record is currently worth to users: a drawdown is
+// weighted a little more heavily than the same rise, because money leaving a protocol is a bigger
+// warning than money arriving is a bonus. The third is how long the protocol has run with no token,
+// which is what a launch would reward.
 //
-//   multiple   median(mcap / tvl) of the row's category (n >= 3) or of the whole live-token set
+//   window     a ratio under 0.01 or over 100 is dropped: a market cap below one per cent of the
+//              protocol's TVL, or above a hundred times it, is a denominator artefact rather than a
+//              comparable, and 11 of the snapshot's 128 ratios fall outside it
+//   multiple   median(mcap / tvl) of the row's category (>= 4 measured) or of the whole measured set
+//   band       the 25th and 75th percentile of the same ratios: the middle half the median sits inside
 //   growthAdj  clamp(1 + w * g / 100, 0.4, 1.6); g = clamp(change_7d, -60, 120); w = 0.7 if g >= 0 else 0.9
 //   maturity   0.55 + 0.45 * min(age_days, 1095) / 1095; age from listed_at, 365 days when unrecorded
 //   implied    max(1, round(tvl_usd * multiple * growthAdj * maturity)), a whole number at most 1e14
+//   low, high  the same product with the band's low and high multiple in place of the median
 //
 // The board is every screened protocol, sorted by implied value and then by slug for ties, ranked from
 // one down; the rank is the model's claim and not the array's order. Protocols whose token already
-// trades are kept out of the ranking entirely: the market prices those itself, and the page shows them
-// beside the board as the calibrated set, so a reader can see where the multiples come from.
+// trades are kept out of the ranking entirely: the market prices those itself, and they are what the
+// multiples are measured from.
+//
+// How the model is checked
+// ------------------------
+// The same ratios let the model be tested on the protocols that already trade. For each of them the
+// multiple is measured again with that protocol left out — its own category's median when four peers
+// remain inside the window, the global median otherwise — and the implied value is compared with the
+// market cap the snapshot records. That is an out-of-sample test of the part of the model that is
+// measured rather than chosen; the growth and maturity terms are bounded adjustments for the quality of
+// a record, not fitted to a price, and the test states the multiple's error alone. Two numbers come out
+// of it: the median size of the miss, and how often the model puts two protocols of the same category
+// in the order the market puts them in. Both are printed by `tools/derive.ts` and shown on the page.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -77,10 +92,14 @@ export interface FarmStep {
   time: string;
 }
 
-/** The three factors behind one row's implied value, as the page states them. */
+/** The factors behind one row's implied value, and the band the multiple's spread puts around it. */
 export interface RowFactors {
   multiple: number;
+  multiple_low: number;
+  multiple_high: number;
   multiple_source: 'category' | 'global';
+  /** How many ratios the multiple was measured from, after the window. */
+  peers: number;
   growth_adj: number;
   maturity: number;
 }
@@ -88,21 +107,69 @@ export interface RowFactors {
 /** One category's calibration line: how many live-token protocols it holds and what they are worth. */
 export interface CalibrationLine {
   category: string;
-  n: number;
-  median_multiple: number;
+  /** Protocols of the category that record both a token and a TVL, before the window. */
+  observed: number;
+  /** Ratios left inside the window: what the median is measured from. */
+  measured: number;
+  dropped: number;
+  median: number;
+  low: number;
+  high: number;
   used_for: 'category' | 'global';
+  /** Board rows that take their multiple from this line. */
+  rows: number;
+  /** Protocols of the category the model was tested on, and the median size of its miss there. */
+  tested: number;
+  test_miss: number | null;
 }
 
 /** The calibration every implied value is read against, computed from the snapshot on the run. */
 export interface Calibration {
-  /** The median ratio over the whole set of protocols that record a token, used when a category is thin. */
   global_median: number;
-  /** How many protocols that median was measured from. */
-  n: number;
-  /** The per-category medians, by category name, for every category with at least three observations. */
+  global_low: number;
+  global_high: number;
+  /** Ratios inside the window across the whole set. */
+  measured: number;
+  /** Ratios the snapshot offered, inside the window or not. */
+  observed: number;
   category_medians: Map<string, number>;
-  /** Every observed category with its count, in descending-count then name order, for the page's table. */
   lines: CalibrationLine[];
+}
+
+/** One protocol the model was tested against: what it says, what the market says, and the gap. */
+export interface BacktestCase {
+  slug: string;
+  name: string;
+  category: string | null;
+  tvl_usd: number;
+  implied_usd: number;
+  actual_usd: number;
+  /** implied / actual - 1, signed, rounded to four places. */
+  miss: number;
+  source: 'category' | 'global';
+  peers: number;
+  /** Whether the case counts toward the test's statistics: a ratio inside the window, no parent's token. */
+  tested: boolean;
+}
+
+/** The out-of-sample test of the measured part of the model. */
+export interface Backtest {
+  /** Protocols that record a token, a market cap and a TVL: one test each. */
+  tested: number;
+  /** Same-category pairs among them, and how many the model orders as the market does. */
+  pairs: number;
+  pairs_right: number;
+  concordance: number;
+  /** Median of |implied / actual - 1| over the tested set. */
+  median_miss: number;
+  within_50: number;
+  within_100: number;
+  /** The calls counted by the size of their miss, in five bands, in the order the page draws them. */
+  buckets: { label: string; count: number }[];
+  /** Every protocol the model was run against, in slug order, for the page's own table. */
+  cases: BacktestCase[];
+  /** One line a category: how many of its protocols were tested, and the median miss among them. */
+  categories: { category: string; tested: number; median_miss: number }[];
 }
 
 /** One row of board.json: a screened protocol, its rank and its plan. */
@@ -118,6 +185,8 @@ export interface BoardRow {
   listed_at: string | null;
   on_watchlist: boolean;
   implied_value_usd: number;
+  implied_low_usd: number;
+  implied_high_usd: number;
   factors: RowFactors;
   plan: FarmStep[];
   farm_steps: string[];
@@ -131,6 +200,12 @@ export interface LiveRow {
   tvl_usd: number;
   mcap_usd: number;
   symbol: string | null;
+  /** What the model says this protocol is worth, with its own figure left out of the peer set. */
+  implied_usd: number;
+  miss: number;
+  source: 'category' | 'global';
+  peers: number;
+  tested: boolean;
 }
 
 /** The page's frozen data interface: what the dashboard reads and renders. */
@@ -146,6 +221,8 @@ export interface RadarRow {
   listed_at: string | null;
   on_watchlist: boolean;
   implied_value_usd: number;
+  implied_low_usd: number;
+  implied_high_usd: number;
   factors: RowFactors;
   plan: FarmStep[];
 }
@@ -163,8 +240,14 @@ export interface Radar {
     early_count: number;
     total_implied_usd: number;
     median_multiple_global: number;
+    global_low: number;
+    global_high: number;
+    measured: number;
+    window_low: number;
+    window_high: number;
     screen_note: string;
     calibration: CalibrationLine[];
+    backtest: Backtest;
   };
   rows: RadarRow[];
   live: LiveRow[];
@@ -179,7 +262,7 @@ export class SnapshotError extends Error {
 }
 
 /** The name the model's numbers are labelled with. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** The rules the structural screen applies, written once so the page can quote them. */
 export const SCREEN_NOTE =
@@ -202,7 +285,12 @@ const MATURITY_FLOOR = 0.55;
 const MATURITY_RANGE = 0.45;
 const MATURITY_DAYS = 1095;
 const UNKNOWN_AGE_DAYS = 365;
-const MIN_CATEGORY_OBSERVATIONS = 3;
+/** A category needs this many measured peers before its own median is used; four is the smallest
+ *  sample whose median has an order-statistic interval at all, and three-peer medians were unusable. */
+const MIN_CATEGORY_OBSERVATIONS = 4;
+/** The measurement window: one per cent of TVL at the floor, a hundred times TVL at the ceiling. */
+const RATIO_FLOOR = 0.01;
+const RATIO_CEILING = 100;
 
 /** A name that ends in a release marker is a pool or a version of another protocol, not a new one. */
 const RELEASE_MARKER = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
@@ -238,55 +326,138 @@ function pricedProtocols(snapshot: Snapshot): SnapshotProtocol[] {
   return snapshot.protocols.filter((p) => (p.mcap_usd ?? 0) > 0 && p.tvl_usd > 0);
 }
 
-/** The median of a list of numbers; 0 for an empty list, the mean of the two middle values for an even one. */
-function median(values: number[]): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const half = sorted.length >> 1;
-  return sorted.length % 2 === 1 ? sorted[half]! : (sorted[half - 1]! + sorted[half]!) / 2;
+/** A protocol's own market-cap-to-TVL ratio; the caller has already checked both are positive. */
+function ratioOf(p: SnapshotProtocol): number {
+  return p.mcap_usd! / p.tvl_usd;
 }
 
-/** A ratio rounded to a hundredth, the precision the page states and the model uses. */
-function toHundredth(value: number): number {
-  return Math.round(value * 100) / 100;
+/** Whether a ratio is inside the measurement window. */
+function inWindow(ratio: number): boolean {
+  return Number.isFinite(ratio) && ratio >= RATIO_FLOOR && ratio <= RATIO_CEILING;
+}
+
+/** The median of an ascending list; 0 for an empty one, the mean of the two middle values for an even one. */
+function medianOfAscending(values: number[]): number {
+  if (values.length === 0) return 0;
+  const half = values.length >> 1;
+  return values.length % 2 === 1 ? values[half]! : (values[half - 1]! + values[half]!) / 2;
+}
+
+/** A percentile of an ascending list by linear interpolation, the same way on every run. */
+function percentileOfAscending(values: number[], q: number): number {
+  const n = values.length;
+  if (n === 0) return 0;
+  const pos = (n - 1) * q;
+  const low = Math.floor(pos);
+  const high = Math.ceil(pos);
+  if (low === high) return values[low]!;
+  return values[low]! + (values[high]! - values[low]!) * (pos - low);
+}
+
+/** A multiple rounded to four places: enough to recompute a row by hand, few enough to print. */
+function toTenThousandth(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+/** A fraction rounded to four places, as the page states the test's numbers. */
+function toTenThousandthFraction(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+/** The ratios of a set of priced protocols that survive the window, ascending. */
+function measuredRatios(protocols: SnapshotProtocol[]): number[] {
+  return protocols
+    .map(ratioOf)
+    .filter(inWindow)
+    .sort((a, b) => a - b);
+}
+
+/** One pool of ratios, summarised: how many it holds, its median and the middle half around it. */
+interface PoolSummary {
+  measured: number;
+  median: number;
+  low: number;
+  high: number;
+}
+
+/** The median and the middle half of a set of ratios already reduced to an ascending list. */
+function summarise(ratios: number[]): PoolSummary {
+  return {
+    measured: ratios.length,
+    median: toTenThousandth(medianOfAscending(ratios)),
+    low: toTenThousandth(percentileOfAscending(ratios, 0.25)),
+    high: toTenThousandth(percentileOfAscending(ratios, 0.75)),
+  };
 }
 
 /**
  * The calibration, read off the snapshot: for every protocol whose record carries a token with a market
  * cap and a TVL, the ratio of what the market pays to what the protocol holds. The whole set's median is
- * the fallback; a category's own median is used when at least three live-token protocols share it.
+ * the fallback; a category's own median is used when at least four of its ratios survive the window.
  */
 export function calibrate(snapshot: Snapshot): Calibration {
   const priced = pricedProtocols(snapshot);
-  const globalMedian = toHundredth(median(priced.map((p) => p.mcap_usd! / p.tvl_usd)));
+  const global = summarise(measuredRatios(priced));
 
-  const byCategory = new Map<string, number[]>();
+  const byCategory = new Map<string, SnapshotProtocol[]>();
   for (const p of priced) {
     const key = p.category ?? 'Uncategorised';
     const seen = byCategory.get(key);
-    if (seen === undefined) byCategory.set(key, [p.mcap_usd! / p.tvl_usd]);
-    else seen.push(p.mcap_usd! / p.tvl_usd);
+    if (seen === undefined) byCategory.set(key, [p]);
+    else seen.push(p);
   }
 
   const categoryMedians = new Map<string, number>();
   const lines: CalibrationLine[] = [];
-  for (const [category, ratios] of byCategory) {
-    const own = ratios.length >= MIN_CATEGORY_OBSERVATIONS;
-    const value = own ? toHundredth(median(ratios)) : globalMedian;
-    if (own) categoryMedians.set(category, value);
-    lines.push({ category, n: ratios.length, median_multiple: value, used_for: own ? 'category' : 'global' });
+  for (const [category, protocols] of byCategory) {
+    const summary = summarise(measuredRatios(protocols));
+    const own = summary.measured >= MIN_CATEGORY_OBSERVATIONS;
+    if (own) categoryMedians.set(category, summary.median);
+    lines.push({
+      category,
+      observed: protocols.length,
+      measured: summary.measured,
+      dropped: protocols.length - summary.measured,
+      median: own ? summary.median : global.median,
+      low: own ? summary.low : global.low,
+      high: own ? summary.high : global.high,
+      used_for: own ? 'category' : 'global',
+      rows: 0,
+      tested: 0,
+      test_miss: null,
+    });
   }
-  lines.sort((a, b) => b.n - a.n || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  lines.sort((a, b) => b.measured - a.measured || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
 
-  return { global_median: globalMedian, n: priced.length, category_medians: categoryMedians, lines };
+  return {
+    global_median: global.median,
+    global_low: global.low,
+    global_high: global.high,
+    measured: global.measured,
+    observed: priced.length,
+    category_medians: categoryMedians,
+    lines,
+  };
 }
 
-/** The multiple a protocol's category is worth, and where that multiple comes from. */
-export function multipleFor(p: SnapshotProtocol, calibration: Calibration): { multiple: number; source: 'category' | 'global' } {
+/** The multiple a protocol's category is worth, where it comes from, and the band around it. */
+export function multipleFor(
+  p: SnapshotProtocol,
+  calibration: Calibration,
+): { median: number; low: number; high: number; source: 'category' | 'global'; peers: number } {
   const key = p.category ?? 'Uncategorised';
   const own = calibration.category_medians.get(key);
-  if (own !== undefined) return { multiple: own, source: 'category' };
-  return { multiple: calibration.global_median, source: 'global' };
+  if (own !== undefined) {
+    const line = calibration.lines.find((l) => l.category === key)!;
+    return { median: own, low: line.low, high: line.high, source: 'category', peers: line.measured };
+  }
+  return {
+    median: calibration.global_median,
+    low: calibration.global_low,
+    high: calibration.global_high,
+    source: 'global',
+    peers: calibration.measured,
+  };
 }
 
 /** Whole days from the snapshot's date to the day a protocol was first listed; null when unrecorded. */
@@ -313,40 +484,173 @@ export function maturityMultiplier(age: number | null): number {
   return MATURITY_FLOOR + (MATURITY_RANGE * days) / MATURITY_DAYS;
 }
 
-/** One protocol's implied value and the factors behind it. */
-export function impliedValue(p: SnapshotProtocol, asOf: string, calibration: Calibration): { implied: number; factors: RowFactors; age: number | null } {
+/** Clamp a product to the range board.json accepts and round it to whole dollars. */
+function wholeValue(raw: number): number {
+  return Math.min(MAX_IMPLIED, Math.max(1, Math.round(raw)));
+}
+
+/** One protocol's implied value, the band around it, and the factors behind both. */
+export function impliedValue(
+  p: SnapshotProtocol,
+  asOf: string,
+  calibration: Calibration,
+): { implied: number; low: number; high: number; factors: RowFactors; age: number | null } {
   const age = ageDays(asOf, p.listed_at);
-  const { multiple, source } = multipleFor(p, calibration);
-  const growthAdj = growthAdjustment(p.change_7d);
-  const maturity = maturityMultiplier(age);
-  const raw = p.tvl_usd * multiple * growthAdj * maturity;
-  const implied = Math.min(MAX_IMPLIED, Math.max(1, Math.round(raw)));
+  const multiple = multipleFor(p, calibration);
+  // The factors are rounded to the precision the page prints, so a reader who multiplies the four
+  // printed numbers gets the ranked value back, exactly, rather than a figure that drifts from it.
+  const growthAdj = toTenThousandth(growthAdjustment(p.change_7d));
+  const maturity = toTenThousandth(maturityMultiplier(age));
+  const scale = growthAdj * maturity;
   return {
-    implied,
+    implied: wholeValue(p.tvl_usd * multiple.median * scale),
+    low: wholeValue(p.tvl_usd * multiple.low * scale),
+    high: wholeValue(p.tvl_usd * multiple.high * scale),
     age,
     factors: {
-      multiple,
-      multiple_source: source,
-      growth_adj: toHundredth(growthAdj),
-      maturity: toHundredth(maturity),
+      multiple: multiple.median,
+      multiple_low: multiple.low,
+      multiple_high: multiple.high,
+      multiple_source: multiple.source,
+      peers: multiple.peers,
+      growth_adj: growthAdj,
+      maturity,
     },
+  };
+}
+
+/**
+ * The model tested on the protocols that already trade: each one's multiple is measured again with the
+ * protocol itself left out, its implied value is compared with the market cap the snapshot records, and
+ * every same-category pair among them is checked for the order the market gives it.
+ */
+export function backtest(snapshot: Snapshot): Backtest {
+  const priced = pricedProtocols(snapshot);
+  // A protocol is tested when it trades a token of its own — one whose name carries a release marker or
+  // a product word trades its parent's (Aave V2's market cap is AAVE's) — and its own ratio is inside
+  // the window the multiples are measured in, so no test is run on a figure the model calls an artefact.
+  const isTested = (p: SnapshotProtocol): boolean =>
+    !RELEASE_MARKER.test(p.name) && !PRODUCT_WORD.test(p.name) && inWindow(ratioOf(p));
+  const pool = priced.filter(isTested);
+
+  const byCategory = new Map<string, SnapshotProtocol[]>();
+  for (const p of pool) {
+    const key = p.category ?? 'Uncategorised';
+    const seen = byCategory.get(key);
+    if (seen === undefined) byCategory.set(key, [p]);
+    else seen.push(p);
+  }
+  const globalRatios = measuredRatios(pool);
+
+  const cases: BacktestCase[] = [];
+  const impliedByProtocol = new Map<string, number>();
+
+  for (const p of priced) {
+    const key = p.category ?? 'Uncategorised';
+    const peers = (byCategory.get(key) ?? []).filter((q) => q.slug !== p.slug);
+    const summary = summarise(measuredRatios(peers));
+    const own = summary.measured >= MIN_CATEGORY_OBSERVATIONS;
+    // With too few peers left, the global pool without this protocol; no test sees its own ratio twice.
+    const multiple = own ? summary.median : summarise(measuredRatios(pool.filter((q) => q.slug !== p.slug))).median;
+    const implied = wholeValue(p.tvl_usd * multiple);
+    impliedByProtocol.set(p.slug, implied);
+    cases.push({
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      tvl_usd: p.tvl_usd,
+      implied_usd: implied,
+      actual_usd: p.mcap_usd!,
+      miss: toTenThousandthFraction(implied / p.mcap_usd! - 1),
+      source: own ? 'category' : 'global',
+      peers: own ? summary.measured : globalRatios.length,
+      tested: isTested(p),
+    });
+  }
+
+  const scored = cases.filter((c) => c.tested);
+  const misses = scored.map((c) => Math.abs(c.miss)).sort((a, b) => a - b);
+
+  let pairs = 0;
+  let pairsRight = 0;
+  for (const [, protocols] of byCategory) {
+    for (let i = 0; i < protocols.length; i++) {
+      for (let j = i + 1; j < protocols.length; j++) {
+        const a = protocols[i]!;
+        const b = protocols[j]!;
+        if (a.mcap_usd === b.mcap_usd) continue;
+        pairs++;
+        const modelSaysAGreater = impliedByProtocol.get(a.slug)! > impliedByProtocol.get(b.slug)!;
+        if (modelSaysAGreater === a.mcap_usd! > b.mcap_usd!) pairsRight++;
+      }
+    }
+  }
+
+  // The calls counted by the band their miss falls in, in the order the page draws them.
+  const bands: [string, (miss: number) => boolean][] = [
+    ['within 20%', (m) => Math.abs(m) <= 0.2],
+    ['20 to 50%', (m) => Math.abs(m) > 0.2 && Math.abs(m) <= 0.5],
+    ['50 to 100%', (m) => Math.abs(m) > 0.5 && Math.abs(m) <= 1],
+    ['1 to 3 times', (m) => Math.abs(m) > 1 && Math.abs(m) <= 3],
+    ['over 3 times', (m) => Math.abs(m) > 3],
+  ];
+  const buckets = bands.map(([label, test]) => ({ label, count: scored.filter((c) => test(c.miss)).length }));
+
+  const byCategoryMiss = new Map<string, number[]>();
+  for (const c of scored) {
+    const key = c.category ?? 'Uncategorised';
+    const seen = byCategoryMiss.get(key);
+    if (seen === undefined) byCategoryMiss.set(key, [Math.abs(c.miss)]);
+    else seen.push(Math.abs(c.miss));
+  }
+  const categories = [...byCategoryMiss.entries()]
+    .map(([category, sizes]) => ({
+      category,
+      tested: sizes.length,
+      median_miss: toTenThousandthFraction(medianOfAscending([...sizes].sort((a, b) => a - b))),
+    }))
+    .sort((a, b) => b.tested - a.tested || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+
+  return {
+    tested: scored.length,
+    pairs,
+    pairs_right: pairsRight,
+    concordance: pairs === 0 ? 0 : toTenThousandthFraction(pairsRight / pairs),
+    median_miss: toTenThousandthFraction(medianOfAscending(misses)),
+    within_50: toTenThousandthFraction(misses.filter((m) => m <= 0.5).length / Math.max(1, misses.length)),
+    within_100: toTenThousandthFraction(misses.filter((m) => m <= 1).length / Math.max(1, misses.length)),
+    buckets,
+    cases: [...cases].sort((a, b) => bySlugCodeUnit(a.slug, b.slug)),
+    categories,
   };
 }
 
 const bySlugCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** The live-token protocols, dearest first, as the page's "already trading" panel shows them. */
-export function liveRows(snapshot: Snapshot): LiveRow[] {
+/**
+ * The protocols whose token already trades, dearest first, each beside what the model says it is worth
+ * with its own ratio left out of the peer set: the page's own column of calls against the market.
+ */
+export function liveRows(snapshot: Snapshot, test: Backtest): LiveRow[] {
+  const cases = new Map(test.cases.map((c) => [c.slug, c]));
   return pricedProtocols(snapshot)
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || bySlugCodeUnit(a.slug, b.slug))
-    .map((p) => ({
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      tvl_usd: p.tvl_usd,
-      mcap_usd: p.mcap_usd!,
-      symbol: p.symbol,
-    }));
+    .map((p) => {
+      const c = cases.get(p.slug)!;
+      return {
+        slug: p.slug,
+        name: p.name,
+        category: p.category,
+        tvl_usd: p.tvl_usd,
+        mcap_usd: p.mcap_usd!,
+        symbol: p.symbol,
+        implied_usd: c.implied_usd,
+        miss: c.miss,
+        source: c.source,
+        peers: c.peers,
+        tested: c.tested,
+      };
+    });
 }
 
 // ------------------------------------------------------------------ the farm plan
@@ -565,8 +869,8 @@ export function buildBoard(snapshot: Snapshot, calibration: Calibration): BoardR
   const scored = snapshot.protocols
     .filter(isCandidate)
     .map((p) => {
-      const { implied, factors, age } = impliedValue(p, snapshot.as_of, calibration);
-      return { p, implied, factors, age, onWatchlist: watchlist.has(p.slug) };
+      const { implied, low, high, factors, age } = impliedValue(p, snapshot.as_of, calibration);
+      return { p, implied, low, high, factors, age, onWatchlist: watchlist.has(p.slug) };
     })
     .sort((a, b) => b.implied - a.implied || bySlugCodeUnit(a.p.slug, b.p.slug));
 
@@ -584,6 +888,8 @@ export function buildBoard(snapshot: Snapshot, calibration: Calibration): BoardR
       listed_at: s.p.listed_at,
       on_watchlist: s.onWatchlist,
       implied_value_usd: s.implied,
+      implied_low_usd: s.low,
+      implied_high_usd: s.high,
       factors: s.factors,
       plan,
       farm_steps: plan.map(foldStep),
@@ -601,7 +907,6 @@ export function fetchedAt(source: string, asOf: string): string {
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Radar } {
   const calibration = calibrate(snapshot);
   const board = buildBoard(snapshot, calibration);
-  const live = liveRows(snapshot);
   const watchlist = new Set(snapshot.watchlist);
   const rows: RadarRow[] = board.map((row) => ({
     rank: row.rank,
@@ -615,9 +920,32 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     listed_at: row.listed_at,
     on_watchlist: row.on_watchlist,
     implied_value_usd: row.implied_value_usd,
+    implied_low_usd: row.implied_low_usd,
+    implied_high_usd: row.implied_high_usd,
     factors: row.factors,
     plan: row.plan,
   }));
+
+  // How many board rows each calibration line prices: the category's own median or the global one.
+  const usesByCategory = new Map<string, number>();
+  let usesGlobal = 0;
+  for (const row of board) {
+    if (row.factors.multiple_source === 'category') {
+      const key = row.category ?? 'Uncategorised';
+      usesByCategory.set(key, (usesByCategory.get(key) ?? 0) + 1);
+    } else usesGlobal++;
+  }
+  const test = backtest(snapshot);
+  const live = liveRows(snapshot, test);
+  const testByCategory = new Map(test.categories.map((c) => [c.category, c]));
+  const lines = calibration.lines.map((line) => {
+    const rows = line.used_for === 'global' && line.measured < MIN_CATEGORY_OBSERVATIONS
+      ? usesGlobal
+      : usesByCategory.get(line.category) ?? 0;
+    const tested = testByCategory.get(line.category);
+    return { ...line, rows, tested: tested?.tested ?? 0, test_miss: tested?.median_miss ?? null };
+  });
+
   const radar: Radar = {
     meta: {
       as_of: snapshot.as_of,
@@ -630,8 +958,14 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       early_count: board.filter((row) => !watchlist.has(row.slug)).length,
       total_implied_usd: board.reduce((sum, row) => sum + row.implied_value_usd, 0),
       median_multiple_global: calibration.global_median,
+      global_low: calibration.global_low,
+      global_high: calibration.global_high,
+      measured: calibration.measured,
+      window_low: RATIO_FLOOR,
+      window_high: RATIO_CEILING,
       screen_note: SCREEN_NOTE,
-      calibration: calibration.lines,
+      calibration: lines,
+      backtest: test,
     },
     rows,
     live,
@@ -665,6 +999,9 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   for (const row of board) {
     if (!Number.isSafeInteger(row.implied_value_usd) || row.implied_value_usd <= 0) return `${row.slug} has implied value ${String(row.implied_value_usd)}`;
     if (row.implied_value_usd > MAX_IMPLIED) return `${row.slug} has an implied value past the cap the gate reads`;
+    if (!(row.implied_low_usd <= row.implied_value_usd && row.implied_value_usd <= row.implied_high_usd)) {
+      return `${row.slug} has a band that does not hold its implied value`;
+    }
     const steps = row.farm_steps;
     if (steps.length < 3 || steps.length > 12) return `${row.slug} has ${steps.length} farm steps`;
     for (const step of steps) {

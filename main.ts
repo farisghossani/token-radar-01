@@ -49,14 +49,15 @@ function fail(code: number, message: string): never {
 }
 
 /**
- * The three views the gate asks for, and the page's own URL that draws each one: the dashboard reads
- * its rows from data.js and opens a filtered board or a protocol's detail straight from the location,
- * so a headless browser takes all three from the same file with nothing but a hash or a query.
+ * The four views the gate asks for, and the page's own URL that draws each one: the dashboard reads
+ * its rows from data.js and opens a filtered board, a protocol's detail or the model's own page
+ * straight from the location, so a headless browser takes all four from the same file.
  */
 const SHOT_VIEWS = [
   { file: '1-board.jpg', view: 'the board itself', url: '' },
   { file: '2-detail.jpg', view: "one protocol's detail view", url: '#p=<slug>' },
   { file: '3-filtered.jpg', view: 'a filtered view', url: '?chain=<chain>&min=<tvl>' },
+  { file: '4-model.jpg', view: 'the model and its calibration', url: '?view=method' },
 ];
 
 const inputArg = arg('input', '/input');

@@ -26,13 +26,15 @@
       <h1>Token Radar</h1>
       <p class="lede">Protocols whose record carries no token, ranked by the value a launch would imply — every number read out of the sealed snapshot, nothing fetched, nothing guessed.</p>
     </div>
+    <nav class="views" aria-label="Views" id="views"></nav>
     <dl class="prov" id="prov"></dl>
   </div>
   <div class="tiles"><div class="wrap tilesgrid" id="tiles"></div></div>
+  <div class="modelbar"><div class="wrap modelgrid" id="model"></div></div>
 </header>
 
 <main>
-  <section class="wrap controls" aria-label="Board controls">
+  <section class="wrap controls" id="controls" aria-label="Board controls">
     <div class="ctl grow">
       <label class="lbl" for="q">Search</label>
       <input id="q" type="search" placeholder="protocol, slug, chain or category" autocomplete="off" spellcheck="false">
@@ -77,7 +79,7 @@
             <th class="c-tvl num"><button type="button" class="thb" data-sort="tvl">TVL</button></th>
             <th class="c-7d num"><button type="button" class="thb" data-sort="growth">7d</button></th>
             <th class="c-age num"><button type="button" class="thb" data-sort="age">Tokenless age</button></th>
-            <th class="c-imp num"><button type="button" class="thb" data-sort="implied">Implied value</button></th>
+            <th class="c-imp num"><button type="button" class="thb" data-sort="implied">Implied value</button><span class="thsub">25th–75th band below</span></th>
             <th class="c-act"><span class="sr">Farm plan</span></th>
           </tr>
         </thead>
@@ -94,42 +96,54 @@
   <section class="wrap" id="method" aria-label="How the board is built">
     <div class="sechead">
       <h2>How the board is built</h2>
-      <p>Every implied value is four measured numbers multiplied together. This page states them, so a reader can recompute any row by hand and disagree with it if they want to.</p>
+      <p id="methodnote"></p>
     </div>
-    <p class="formula">implied = round( TVL × multiple × growthAdj × maturity )</p>
-    <div class="mgrid">
-      <article class="card">
-        <h3>The four factors</h3>
-        <dl class="consts" id="consts"></dl>
-      </article>
-      <article class="card">
-        <h3>What the screen keeps, and what it drops</h3>
-        <p class="body" id="screen"></p>
-        <p class="body muted" id="calnote"></p>
-      </article>
-    </div>
-    <div class="sechead sub">
-      <h3>Calibration — the multiples, measured on this snapshot</h3>
-      <p>For every protocol in the snapshot that already records a token, the ratio is its market cap over its TVL. A category's multiple is the median of those ratios; a category with fewer than three observations falls back to the global median. The board's own protocols are absent from this table by construction: they record no token, so they have no ratio.</p>
-    </div>
-    <div class="tablewrap">
-      <table class="cal">
-        <thead>
-          <tr>
-            <th>Category</th>
-            <th class="num">Protocols that trade</th>
-            <th class="num">Median mcap / TVL</th>
-            <th>Applied to</th>
-          </tr>
-        </thead>
-        <tbody id="calib"></tbody>
-      </table>
+    <p class="formula" id="formula"></p>
+    <div class="methodbody">
+      <div class="mleft">
+        <div class="sechead sub">
+          <h3>Calibration — one line per category the board prices</h3>
+          <p id="calintro"></p>
+        </div>
+        <div class="tablewrap">
+          <table class="cal">
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th class="num">Measured<span class="thsub">of traded</span></th>
+                <th class="num">Median mcap ÷ TVL<span class="thsub">25th–75th</span></th>
+                <th class="num">Board rows<span class="thsub">priced by it</span></th>
+                <th class="num">Tested<span class="thsub">median miss</span></th>
+              </tr>
+            </thead>
+            <tbody id="calib"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="mright">
+        <article class="card">
+          <h3>The four factors</h3>
+          <dl class="consts" id="consts"></dl>
+        </article>
+        <article class="card testcard">
+          <h3>Tested out of sample</h3>
+          <p class="body" id="testlead"></p>
+          <div class="testnums" id="testnums"></div>
+          <div class="buckets" id="buckets"></div>
+          <p class="body muted" id="testnote"></p>
+        </article>
+        <article class="card screencard">
+          <h3>The screen</h3>
+          <p class="body" id="screen"></p>
+          <p class="body muted" id="calnote"></p>
+        </article>
+      </div>
     </div>
   </section>
 
   <section class="wrap" id="live" aria-label="Protocols that already trade">
     <div class="sechead">
-      <h2>Already trading — set aside</h2>
+      <h2>Already trading — the model, called against the market</h2>
       <p id="livesub"></p>
     </div>
     <div class="tablewrap tall">
@@ -141,7 +155,9 @@
             <th>Category</th>
             <th class="num">TVL</th>
             <th class="num">Market cap</th>
-            <th class="num">mcap / TVL</th>
+            <th class="num">mcap ÷ TVL</th>
+            <th class="num">Model says<span class="thsub">own figure left out</span></th>
+            <th class="num">Miss</th>
           </tr>
         </thead>
         <tbody id="liverows"></tbody>
@@ -152,7 +168,7 @@
 
 <footer class="wrap foot">
   <p id="footnote"></p>
-  <p class="muted">One local script (<span class="mono">data.js</span>, written by the entrypoint from the same board) is loaded beside this page. The page makes no request of any kind, and it renders the same bytes on every load: no clock, no random source.</p>
+  <p class="muted">One local script (<span class="mono">data.js</span>, written by the entrypoint from the same board) is loaded beside this page. The page makes no request of any kind, and it renders the same bytes on every load: no clock, no random source. Every figure above is re-derived from the snapshot by <span class="mono">main.ts</span> and <span class="mono">tools/derive.ts</span>.</p>
 </footer>
 
 <div class="scrim" id="scrim" hidden></div>
@@ -168,7 +184,8 @@
     <div class="dcol">
       <h3 class="dh">The implied value, factor by factor</h3>
       <table class="factors"><tbody id="dfactors"></tbody></table>
-      <p class="dnote" id="dcalc"></p>
+      <p class="dcalc" id="dcalc"></p>
+      <p class="dcalc" id="dband"></p>
       <h3 class="dh">The protocol, as the snapshot records it</h3>
       <dl class="facts" id="dfacts"></dl>
       <p class="dnote" id="dnotetoken"></p>

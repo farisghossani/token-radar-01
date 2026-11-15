@@ -2,20 +2,23 @@
  *
  * The page is one screen over one file: data.js, written by the entrypoint from the same ranked board
  * it hands the gate. There is no fetch, no timer, no random source and no clock anywhere below, so a
- * reload draws the same board with the same numbers, and the three screenshots are that same draw.
+ * reload draws the same board with the same numbers, and the screenshots are that same draw.
  *
  * What it does with window.RADAR:
  *   - a filter bar (free search over name, slug, chain and category; category, chain and minimum-TVL
  *     selects; a watchlist-only switch) and a sort over rank/implied value, TVL, 7-day change,
  *     tokenless age, name and category, always tie-broken by rank so the order is total and stable;
  *   - the board itself: rank, protocol and its chains, category, TVL, 7-day change, tokenless age,
- *     the implied value with a bar relative to the highest implied value on the board, and the plan;
- *   - a detail view per protocol: the implied value factor by factor, the facts the snapshot records,
- *     and the farm plan step by step with the cost and the time each step takes;
- *   - the method: the formula, the four factors with their constants, and the full calibration table
- *     the multiples were measured from — the page states its own model, it does not just apply it;
- *   - the protocols that already trade, set aside with their market cap, because the market prices
- *     those itself and the board's ranking is for the ones with no price at all.
+ *     the implied value with its 25th–75th band, and the plan;
+ *   - the model strip under the tiles: the formula and the four factors, on the first screen, so a
+ *     reader sees how a value is built before reading it;
+ *   - a detail view per protocol: the implied value factor by factor, the band and where it comes from,
+ *     the facts the snapshot records, and the farm plan step by step with the cost and the time;
+ *   - the method section: the screen, the calibration table (one line a category: measured peers, the
+ *     median multiple, the middle half, the board rows it prices, and the model's own miss there), and
+ *     the out-of-sample test of the multiple on the protocols that already trade;
+ *   - the protocols that already trade, each beside what the model says it is worth with its own ratio
+ *     left out of the peer set: the model called against the market, all 128 of them.
  *
  * Every number on screen is formatted with one fixed locale so nothing depends on the reader's
  * machine, and every comparison is on the raw numbers, never on the formatted text.
@@ -27,6 +30,8 @@
   var META = DATA.meta || {};
   var ROWS = DATA.rows || [];
   var LIVE = DATA.live || [];
+  var TEST = META.backtest || { buckets: [], categories: [] };
+  var CAL = META.calibration || [];
 
   /* ---------- formatting: one locale, no clock ---------- */
 
@@ -37,18 +42,26 @@
   var UNITS = [['T', 1e12], ['B', 1e9], ['M', 1e6], ['K', 1e3]];
 
   function usd(n) { return '$' + INT.format(n); }
+  /** Three significant figures: $2.75B, $142M, $6.61M. Enough to read, never a fake precision. */
   function usdShort(n) {
     for (var i = 0; i < UNITS.length; i++) {
-      if (n >= UNITS[i][1]) return '$' + D3.format(n / UNITS[i][1]) + UNITS[i][0];
+      if (n >= UNITS[i][1]) {
+        var v = n / UNITS[i][1];
+        return '$' + v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2) + UNITS[i][0];
+      }
     }
     return '$' + INT.format(n);
   }
+  /** A factor printed to four decimals with its trailing zeros dropped: 0.2748, 0.98, 1. */
+  function fx(n) { return String(Number(n.toFixed(4))); }
   function pct(n) { return (n > 0 ? '+' : '') + D2.format(n) + '%'; }
+  function mult(n) { return n >= 10 ? D1.format(n) : D3.format(n); }
   function ageText(n) { return n === null ? 'unrecorded' : (n < 365 ? n + ' d' : D1.format(n / 365) + ' y'); }
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
+  function signed(n) { return (n > 0 ? '+' : n < 0 ? '\u2212' : '') + INT.format(Math.abs(Math.round(n * 100))) + '%'; }
 
   /* ---------- the sort table: six keys, each with the direction it reads best in ---------- */
 
@@ -63,26 +76,30 @@
   var SORT_ORDER = ['implied', 'tvl', 'growth', 'age', 'name', 'category'];
 
   var MINS = [
-    [0, 'Any TVL'], [5e7, '≥ $50M (the floor)'], [1e8, '≥ $100M'],
-    [25e7, '≥ $250M'], [5e8, '≥ $500M'], [1e9, '≥ $1B'], [2e9, '≥ $2B']
+    [0, 'Any TVL'], [5e7, '\u2265 $50M (the floor)'], [1e8, '\u2265 $100M'],
+    [25e7, '\u2265 $250M'], [5e8, '\u2265 $500M'], [1e9, '\u2265 $1B'], [2e9, '\u2265 $2B']
   ];
 
+  var VIEW = 'board';
   var state = { q: '', terms: [], cat: '', chain: '', min: 0, wl: false, sort: 'implied', dir: 'desc', open: '' };
 
   var $ = function (id) { return document.getElementById(id); };
   var el = {
-    prov: $('prov'), tiles: $('tiles'), q: $('q'), cat: $('cat'), chain: $('chain'), min: $('min'),
+    views: $('views'), prov: $('prov'), tiles: $('tiles'), model: $('model'),
+    q: $('q'), cat: $('cat'), chain: $('chain'), min: $('min'),
     sort: $('sort'), wl: $('wl'), reset: $('reset'), count: $('count'), chips: $('chips'),
     rows: $('rows'), empty: $('empty'), etotal: $('etotal'), ereset: $('ereset'), boardnote: $('boardnote'),
-    boardwrap: $('boardwrap'),
-    consts: $('consts'), screen: $('screen'), calnote: $('calnote'), calib: $('calib'),
+    boardwrap: $('boardwrap'), methodnote: $('methodnote'), formula: $('formula'),
+    consts: $('consts'), screen: $('screen'), calnote: $('calnote'), calintro: $('calintro'),
+    calib: $('calib'), testlead: $('testlead'), testnums: $('testnums'), buckets: $('buckets'),
+    testnote: $('testnote'),
     liverows: $('liverows'), livesub: $('livesub'), footnote: $('footnote'),
     detail: $('detail'), scrim: $('scrim'), dclose: $('dclose'), dkick: $('dkick'), dtitle: $('dtitle'),
-    dsub: $('dsub'), dfactors: $('dfactors'), dcalc: $('dcalc'), dfacts: $('dfacts'),
+    dsub: $('dsub'), dfactors: $('dfactors'), dcalc: $('dcalc'), dband: $('dband'), dfacts: $('dfacts'),
     dnotetoken: $('dnotetoken'), dlead: $('dlead'), dplan: $('dplan')
   };
 
-  /* ---------- the URL is the state: ?q=…&cat=…&chain=…&min=…&wl=1&sort=…&dir=… , #p=<slug> ---------- */
+  /* ---------- the URL is the state: ?view=method, ?q=…&cat=…&chain=…&min=…&wl=1&sort=… , #p=<slug> ---------- */
 
   function parsePairs(text) {
     var out = {};
@@ -99,12 +116,7 @@
 
   function readURL() {
     var merged = {};
-    var sources = [
-      parsePairs((parsePairs(window.location.search).filter) || ''),
-      parsePairs(window.location.search),
-      parsePairs(window.location.hash)
-    ];
-    sources.forEach(function (bag) {
+    [parsePairs(window.location.search), parsePairs(window.location.hash)].forEach(function (bag) {
       for (var k in bag) { if (Object.prototype.hasOwnProperty.call(bag, k)) merged[k] = bag[k]; }
     });
     return merged;
@@ -169,8 +181,12 @@
 
   function chainLine(chains) {
     if (!chains.length) return 'chain unrecorded';
-    var head = chains.slice(0, 3).join(' · ');
+    var head = chains.slice(0, 3).join(' \u00b7 ');
     return chains.length > 3 ? head + ' +' + (chains.length - 3) + ' more' : head;
+  }
+
+  function bandOf(r) {
+    return usdShort(r.implied_low_usd) + '\u2013' + usdShort(r.implied_high_usd);
   }
 
   function rowHTML(r) {
@@ -185,17 +201,19 @@
         '<span class="chains">' + esc(chainLine(r.chains)) + '</span></td>' +
       '<td class="c-cat"><span class="chip">' + esc(r.category || 'unclassified') + '</span></td>' +
       '<td class="c-tvl num">' + usdShort(r.tvl_usd) + '</td>' +
-      '<td class="c-7d num ' + gCls + '">' + (g === null ? '—' : pct(g)) + '</td>' +
-      '<td class="c-age num">' + (r.age_days === null ? '—' : ageText(r.age_days)) + '</td>' +
-      '<td class="c-imp num"><span class="bar"><i style="width:' + D1.format(width) + '%"></i></span>' +
-        usd(r.implied_value_usd) + '</td>' +
+      '<td class="c-7d num ' + gCls + '">' + (g === null ? '\u2014' : pct(g)) + '</td>' +
+      '<td class="c-age num">' + (r.age_days === null ? '\u2014' : ageText(r.age_days)) + '</td>' +
+      '<td class="c-imp num"><span class="impv"><span class="bar"><i style="width:' + D1.format(width) + '%"></i></span>' +
+        usd(r.implied_value_usd) + '</span>' +
+        '<span class="band">' + bandOf(r) + ' \u00b7 ' +
+        (r.factors.multiple_source === 'category' ? esc(r.category) : 'global') + '</span></td>' +
       '<td class="c-act"><button type="button" class="btn tiny" data-slug="' + esc(r.slug) + '">Plan</button></td>' +
       '</tr>';
   }
 
-  function chip(label, key, value) {
+  function chip(label, key) {
     return '<li class="chip-f">' + esc(label) +
-      '<button type="button" data-clear="' + esc(key) + '" title="Clear this filter">×</button></li>';
+      '<button type="button" data-clear="' + esc(key) + '" title="Clear this filter">\u00d7</button></li>';
   }
 
   function renderBoard() {
@@ -204,13 +222,13 @@
     var filtered = state.q || state.cat || state.chain || state.min || state.wl;
     el.count.innerHTML = '<b>' + INT.format(list.length) + '</b> of ' + INT.format(ROWS.length) +
       ' screened protocols' + (filtered ? ' match this filter' : ' on the board') +
-      ' · sorted by ' + SORTS[state.sort].label + ', ' + (state.dir === 'asc' ? 'ascending' : 'descending');
+      ' \u00b7 sorted by ' + SORTS[state.sort].label + ', ' + (state.dir === 'asc' ? 'ascending' : 'descending');
     el.empty.hidden = list.length > 0;
     el.etotal.textContent = INT.format(ROWS.length);
     el.boardwrap.style.display = list.length ? '' : 'none';
 
     var chips = [];
-    if (state.q) chips.push(chip('search: “' + state.q + '”', 'q'));
+    if (state.q) chips.push(chip('search: \u201c' + state.q + '\u201d', 'q'));
     if (state.cat) chips.push(chip('category: ' + state.cat, 'cat'));
     if (state.chain) chips.push(chip('chain: ' + state.chain, 'chain'));
     if (state.min) chips.push(chip('TVL ' + minLabel(state.min), 'min'));
@@ -218,11 +236,10 @@
     el.chips.innerHTML = chips.join('');
 
     el.boardnote.textContent = (filtered
-        ? INT.format(list.length) + ' of the board\'s ' + INT.format(ROWS.length) + ' rows pass this filter.'
+        ? INT.format(list.length) + ' of the board\u2019s ' + INT.format(ROWS.length) + ' rows pass this filter.'
         : 'The board holds ' + INT.format(ROWS.length) + ' rows.') +
       ' Across it: ' + INT.format(META.watchlist_count) + ' protocols from the house watchlist and ' +
-      INT.format(META.early_count) + ' pre-token protocols the screen found beneath the floor.' +
-      ' Click any row for the factor-by-factor breakdown and its farm plan.';
+      INT.format(META.early_count) + ' the screen found beneath the floor. Click a row for its factors, its band and its plan.';
 
     Array.prototype.forEach.call(document.querySelectorAll('.board thead th'), function (th) {
       var b = th.querySelector('.thb');
@@ -239,20 +256,22 @@
   function factorRows(r) {
     var f = r.factors;
     var src = f.multiple_source === 'category'
-      ? 'the median of its category, measured on ' + INT.format(catCount(r.category)) + ' protocols that already trade'
-      : 'the global median, used because its category holds fewer than three protocols that trade';
-    return '<tr><td>TVL, the snapshot\'s</td><td class="num">' + usd(r.tvl_usd) + '</td></tr>' +
-      '<tr><td>× multiple <span class="src">' + esc(src) + '</span></td>' +
-        '<td class="num">' + D2.format(f.multiple) + '</td></tr>' +
-      '<tr><td>× growthAdj <span class="src">' +
+      ? 'the median of its category, measured on ' + INT.format(f.peers) + ' protocols that already trade'
+      : 'the global median, used because its category holds fewer than four measured peers';
+    return '<tr><td>TVL, the snapshot\u2019s</td><td class="num">' + usd(r.tvl_usd) + '</td></tr>' +
+      '<tr><td>\u00d7 multiple <span class="src">' + esc(src) + '</span></td>' +
+        '<td class="num">' + fx(f.multiple) + '</td></tr>' +
+      '<tr><td>\u00d7 growthAdj <span class="src">' +
         (r.change_7d === null ? 'no 7-day change is recorded, so the adjustment is 1' :
-          '7 days: ' + pct(r.change_7d) + ', clamped to the −60 to +120 band, weight ' + (r.change_7d < 0 ? '0.9 (a fall counts harder)' : '0.7')) +
-        '</span></td><td class="num">' + D2.format(f.growth_adj) + '</td></tr>' +
-      '<tr><td>× maturity <span class="src">' +
+          '7 days: ' + pct(r.change_7d) + ', clamped to the \u221260 to +120 band, weight ' + (r.change_7d < 0 ? '0.9 (a fall counts harder)' : '0.7')) +
+        '</span></td><td class="num">' + fx(f.growth_adj) + '</td></tr>' +
+      '<tr><td>\u00d7 maturity <span class="src">' +
         (r.age_days === null ? 'no listing date is recorded, so the age is read as 365 days' :
           INT.format(r.age_days) + ' days tokenless, capped at 1,095') +
-        '</span></td><td class="num">' + D2.format(f.maturity) + '</td></tr>' +
-      '<tr class="total"><td>= implied value</td><td class="num">' + usd(r.implied_value_usd) + '</td></tr>';
+        '</span></td><td class="num">' + fx(f.maturity) + '</td></tr>' +
+      '<tr class="total"><td>= implied value</td><td class="num">' + usd(r.implied_value_usd) + '</td></tr>' +
+      '<tr class="bandrow"><td>25th\u201375th band <span class="src">the middle half of those ratios</span></td>' +
+        '<td class="num">' + bandOf(r) + '</td></tr>';
   }
 
   /** The hand multiplication under the table: what the printed factors give, and how far off that is. */
@@ -261,18 +280,21 @@
     var hand = Math.max(1, Math.round(r.tvl_usd * f.multiple * f.growth_adj * f.maturity));
     var drift = hand === r.implied_value_usd ? 0
       : (Math.abs(r.implied_value_usd - hand) / r.implied_value_usd) * 100;
-    return INT.format(r.tvl_usd) + ' × ' + D2.format(f.multiple) + ' × ' + D2.format(f.growth_adj) +
-      ' × ' + D2.format(f.maturity) + ' = ' + INT.format(hand) +
+    return INT.format(r.tvl_usd) + ' \u00d7 ' + fx(f.multiple) + ' \u00d7 ' + fx(f.growth_adj) +
+      ' \u00d7 ' + fx(f.maturity) + ' = ' + INT.format(hand) +
       (drift === 0
-        ? ' — the ranked value, exactly'
-        : ' — ' + D2.format(drift) + '% from the ranked value, because the four factors above are printed ' +
-          'rounded to two decimals while the rank multiplies them unrounded');
+        ? ' \u2014 the ranked value, exactly'
+        : ' \u2014 ' + D3.format(drift) + '% from the ranked value, from the last digit the factors are printed at');
   }
 
-  function catCount(category) {
-    var list = META.calibration || [];
-    for (var i = 0; i < list.length; i++) if (list[i].category === category) return list[i].n;
-    return 0;
+  function bandNote(r) {
+    var f = r.factors;
+    var src = f.multiple_source === 'category'
+      ? 'its category\u2019s ' + INT.format(f.peers) + ' measured ratios'
+      : 'the ' + INT.format(f.peers) + ' measured ratios of the whole set';
+    return 'Where the band comes from: ' + src + ' run from ' + mult(f.multiple_low) + ' to ' + mult(f.multiple_high) +
+      ' between the 25th and 75th percentile, so this TVL is worth ' + bandOf(r) +
+      ' before the growth and maturity terms move it. A band is a spread, not a range of promises.';
   }
 
   var returnFocus = null;
@@ -283,27 +305,28 @@
     state.open = slug;
     returnFocus = from || null;
     el.dkick.textContent = 'Rank ' + r.rank + ' of ' + INT.format(ROWS.length) +
-      (r.on_watchlist ? ' · on the house watchlist' : ' · found by the screen');
+      (r.on_watchlist ? ' \u00b7 on the house watchlist' : ' \u00b7 found by the screen');
     el.dtitle.textContent = r.name;
-    el.dsub.textContent = (r.category || 'unclassified') + ' · ' + r.chains.length + ' chain' +
-      (r.chains.length === 1 ? '' : 's') + ' · ' + r.slug;
+    el.dsub.textContent = (r.category || 'unclassified') + ' \u00b7 ' + r.chains.length + ' chain' +
+      (r.chains.length === 1 ? '' : 's') + ' \u00b7 ' + r.slug;
     el.dfactors.innerHTML = factorRows(r);
     el.dcalc.textContent = calcNote(r);
+    el.dband.textContent = bandNote(r);
     el.dfacts.innerHTML =
       '<dt>Category</dt><dd>' + esc(r.category || 'unclassified') + '</dd>' +
       '<dt>Chains</dt><dd>' + esc(r.chains.length ? r.chains.join(', ') : 'unrecorded') + '</dd>' +
       '<dt>TVL</dt><dd>' + usd(r.tvl_usd) + '</dd>' +
       '<dt>7-day change</dt><dd>' + (r.change_7d === null ? 'unrecorded' : pct(r.change_7d)) + '</dd>' +
-      '<dt>Listed at</dt><dd>' + (r.listed_at || 'unrecorded — read as 365 days') + '</dd>' +
+      '<dt>Listed at</dt><dd>' + (r.listed_at || 'unrecorded \u2014 read as 365 days') + '</dd>' +
       '<dt>Tokenless</dt><dd>' + ageText(r.age_days) + (r.age_days === null ? '' : ' (' + INT.format(r.age_days) + ' days)') + '</dd>' +
-      '<dt>Multiple used</dt><dd>' + D2.format(r.factors.multiple) + ' — ' + r.factors.multiple_source + '</dd>' +
+      '<dt>Multiple used</dt><dd>' + fx(r.factors.multiple) + ' \u2014 ' + r.factors.multiple_source + '</dd>' +
       '<dt>Watchlist</dt><dd>' + (r.on_watchlist ? 'yes, one of the ' + INT.format(META.watchlist_count) + ' the house tracks' : 'no, the screen found it below the floor') + '</dd>' +
       '<dt>Slug</dt><dd>' + esc(r.slug) + '</dd>';
     el.dnotetoken.textContent = r.name + ' records no token: its snapshot entry carries no CoinGecko id and no symbol. ' +
-      'That is not the same as having none. Nothing here promises a launch — the board ranks a record, and the record can change before anything else does.';
+      'That is not the same as having none. Nothing here promises a launch \u2014 the board ranks a record, and the record can change before anything else does.';
     var steps = r.plan || [];
     el.dlead.textContent = INT.format(steps.length) + ' steps, none of them a promise: open a wallet, put the position on ' +
-      (r.chains[0] || 'the protocol\'s own chain') + ', stay active, and keep the record long enough to matter. ' +
+      (r.chains[0] || 'the protocol\u2019s own chain') + ', stay active, and keep the record long enough to matter. ' +
       'Each step carries the cost and the time it asks for.';
     el.dplan.innerHTML = steps.map(function (s) {
       return '<li><b>' + esc(s.step) + '</b><span class="meta"><span class="c">' + esc(s.cost) +
@@ -329,44 +352,103 @@
     returnFocus = null;
   }
 
+  /* ---------- the model, stated on the first screen ---------- */
+
+  function renderModel() {
+    var win = 'a ratio under ' + mult(META.window_low) + ' or over ' + INT.format(META.window_high) + ' is dropped';
+    el.formula.textContent = 'implied = round( TVL \u00d7 multiple \u00d7 growthAdj \u00d7 maturity )';
+    el.model.innerHTML =
+      '<div class="mformula"><span class="mk">the model</span>' +
+        '<p class="mono">implied = TVL \u00d7 multiple \u00d7 growthAdj \u00d7 maturity</p>' +
+        '<p class="mnote">four factors, all measured on the snapshot, ' + INT.format(META.candidate_count) +
+        ' protocols ranked, every row recomputable by hand</p></div>' +
+      '<dl class="mfact"><dt>multiple</dt><dd>' + mult(META.median_multiple_global) +
+        '<span>median mcap \u00f7 TVL of the row\u2019s own category, n \u2265 4 measured, else the global figure</span></dd></dl>' +
+      '<dl class="mfact"><dt>growthAdj</dt><dd>0.4 \u2013 1.6' +
+        '<span>1 + 0.7 \u00d7 the 7-day change (0.9 when it falls), clamped</span></dd></dl>' +
+      '<dl class="mfact"><dt>maturity</dt><dd>0.55 \u2013 1.00' +
+        '<span>grows with the days the record has run with no token, capped at 1,095</span></dd></dl>' +
+      '<dl class="mfact wide"><dt>the band</dt><dd>' + mult(META.global_low) + ' \u2013 ' + mult(META.global_high) +
+        '<span>the 25th\u201375th of the same ratios, under every value; ' + win + '. ' + INT.format(META.measured) +
+        ' of ' + INT.format(META.live_count) + ' traded ratios are measured</span></dd></dl>';
+  }
+
+  function renderViews() {
+    el.views.innerHTML =
+      '<a href="?view=board"' + (VIEW === 'board' ? ' class="on" aria-current="page"' : '') + '>Board</a>' +
+      '<a href="?view=method"' + (VIEW === 'method' ? ' class="on" aria-current="page"' : '') + '>Model</a>';
+  }
+
   /* ---------- the method, stated in full ---------- */
 
   function renderMethod() {
-    var cal = META.calibration || [];
+    var bt = TEST;
+    var own = CAL.filter(function (c) { return c.used_for === 'category'; });
+    var globalRow = CAL.filter(function (c) { return c.used_for === 'global'; });
+
+    el.methodnote.textContent = 'Four measured numbers multiplied together. This page states them, the sample each one ' +
+      'comes from, and how the model does when it is asked about protocols whose token already trades.';
+
     el.consts.innerHTML =
-      '<dt>multiple</dt><dd>The median of market cap ÷ TVL over the protocols of the row\'s own category that ' +
-        'already record a token, when that category holds three or more of them. A thinner category falls back to the ' +
-        'global median, <b>' + D2.format(META.median_multiple_global) + '</b>, measured over <b>' +
-        INT.format(META.live_count) + '</b> protocols that trade.</dd>' +
-      '<dt>growthAdj</dt><dd>clamp(1 + w × g ÷ 100, 0.4, 1.6), with g = clamp(change_7d, −60, +120) and ' +
-        'w = <b>0.7</b> when g is at or above zero, <b>0.9</b> when it is below: a 7-day drawdown is a bigger warning ' +
-        'than the same rise is a bonus, so a fall is discounted harder.</dd>' +
-      '<dt>maturity</dt><dd>0.55 + 0.45 × min(age_days, 1,095) ÷ 1,095, the age counted from the snapshot\'s own ' +
-        'as_of back to the listing date. A protocol with no recorded listing date is read as <b>365 days</b> old, and ' +
-        'the cap at 1,095 days keeps a very long record from dominating the ranking on its own.</dd>' +
-      '<dt>implied</dt><dd>round(TVL × multiple × growthAdj × maturity): one whole number, at least $1. The board ' +
-        'ranks on that number, ties broken by slug, and the rank on screen is the model\'s claim and not the ' +
-        'array\'s order.</dd>' +
-      '<dt>the floor</dt><dd>The snapshot is drawn at <b>' + usd(META.floor_usd) + '</b> of TVL. The screen is ' +
-        'applied at every TVL, so the board is the house watchlist plus the pre-token protocols the screen finds ' +
-        'beneath the floor: <b>' + INT.format(META.watchlist_count) + '</b> watchlist protocols and <b>' +
-        INT.format(META.early_count) + '</b> found lower down.</dd>' +
-      '<dt>what is left out</dt><dd>The <b>' + INT.format(META.live_count) + '</b> protocols whose token already ' +
-        'trades. The market prices those itself, so the board ranks only what has no price: the board\'s own rows ' +
-        'are the ones carrying no token, and the live set is used to measure the multiples instead of being ranked ' +
-        'by them.</dd>';
+      '<dt>multiple</dt><dd>The median of market cap \u00f7 TVL over the row\u2019s own category, when four or more of ' +
+        'its ratios survive the window: <b>' + mult(META.median_multiple_global) + '</b> globally, measured on <b>' +
+        INT.format(META.measured) + '</b> of the ' + INT.format(META.live_count) + ' protocols that trade. Four is the ' +
+        'smallest sample whose median has an order-statistic interval, so a thinner category takes the global figure.</dd>' +
+      '<dt>the window</dt><dd>A ratio under <b>' + mult(META.window_low) + '</b> or over <b>' +
+        INT.format(META.window_high) + '</b> is dropped: a market cap under one per cent of a protocol\u2019s TVL, or over ' +
+        'a hundred times it, is a denominator artefact and not a comparable. <b>' +
+        INT.format(META.live_count - META.measured) + '</b> of the ' + INT.format(META.live_count) + ' fall outside it.</dd>' +
+      '<dt>growthAdj</dt><dd>clamp(1 + w \u00d7 g \u00f7 100, 0.4, 1.6), g = clamp(change_7d, \u221260, +120), w = <b>0.7</b> ' +
+        'above zero and <b>0.9</b> below: a drawdown is a bigger warning than the same rise is a bonus.</dd>' +
+      '<dt>maturity</dt><dd>0.55 + 0.45 \u00d7 min(age_days, 1,095) \u00f7 1,095, the age counted back from the ' +
+        'snapshot\u2019s as_of to the listing date, and <b>365 days</b> when no date is recorded.</dd>' +
+      '<dt>the band</dt><dd>The 25th and 75th percentile of the same ratios, through the same TVL, growth and maturity: ' +
+        'what the category\u2019s own spread says about one of its members. It is printed under every value.</dd>';
+
     el.screen.textContent = META.screen_note || '';
     el.calnote.textContent = 'Read across the whole snapshot: ' + INT.format(META.protocols) + ' protocols, ' +
       INT.format(META.candidate_count) + ' screened in, ' + INT.format(META.live_count) +
       ' trading tokens measured for the multiples above, and ' + INT.format(META.early_count) +
       ' pre-token protocols the screen found below the floor.';
-    el.calib.innerHTML = cal.map(function (c) {
-      return '<tr><td>' + esc(c.category) + '</td><td class="num">' + c.n + '</td><td class="num">' +
-        D2.format(c.median_multiple) + '</td><td>' +
-        (c.used_for === 'category'
-          ? 'the category\'s own rows'
-          : 'every category with fewer than three — the global median') + '</td></tr>';
+
+    el.testlead.textContent = 'Every protocol whose token trades is asked the model\u2019s question with its own ratio ' +
+      'left out, and the answer goes beside the market cap the snapshot records. ' + INT.format(bt.tested) + ' of ' +
+      INT.format(META.live_count) + ' are scored: the test drops parents\u2019 tokens and ratios outside the window.';
+    el.testnums.innerHTML =
+      '<div class="tn hot"><b>' + D1.format(bt.concordance * 100) + '%</b>' +
+        '<span>of ' + INT.format(bt.pairs) + ' same-category pairs ordered as the market does (chance: 50%)</span></div>' +
+      '<div class="tn"><b>' + INT.format(Math.round(bt.median_miss * 100)) + '%</b>' +
+        '<span>median miss: half land closer, half further</span></div>' +
+      '<div class="tn"><b>' + INT.format(Math.round(bt.within_100 * 100)) + '%</b>' +
+        '<span>land between half and double the market\u2019s figure</span></div>';
+    el.buckets.innerHTML = bt.buckets.map(function (b) {
+      var share = bt.tested ? (b.count / bt.tested) * 100 : 0;
+      return '<li><span class="bl">' + esc(b.label) + '</span><span class="bwrap"><i style="width:' +
+        D1.format(share) + '%"></i></span><span class="bn">' + b.count + '</span></li>';
     }).join('');
+    el.testnote.textContent = 'The test measures the multiple, the part of the model read off the snapshot; growthAdj ' +
+      'and maturity are bounded by hand and have no market figure to be checked against. The miss is why every row ' +
+      'carries a band.';
+
+    el.calintro.textContent = 'How many of a category\u2019s protocols trade and how many ratios survive the window (the ' +
+      'median is measured on those), the median multiple with the middle half around it, the board rows priced by it, and ' +
+      'the model\u2019s own median miss there. Categories with fewer than four measured peers take the global line, last.';
+
+    var rowsHtml = own.map(function (c) {
+      return '<tr><td>' + esc(c.category) + '</td>' +
+        '<td class="num">' + c.measured + '<span class="sub">of ' + c.observed + '</span></td>' +
+        '<td class="num">' + mult(c.median) + '<span class="sub">' + mult(c.low) + ' \u2013 ' + mult(c.high) + '</span></td>' +
+        '<td class="num">' + c.rows + '</td>' +
+        '<td class="num">' + (c.tested ? INT.format(Math.round((c.test_miss || 0) * 100)) + '%<span class="sub">' + c.tested + ' tested</span>' : '\u2014') + '</td></tr>';
+    }).join('');
+    var restRows = globalRow.length ? globalRow[0].rows : 0;
+    rowsHtml += '<tr class="globalrow"><td>Every other category <span class="sub">' + globalRow.length +
+      ' categories with fewer than four measured peers</span></td>' +
+      '<td class="num">' + INT.format(META.measured) + '<span class="sub">of ' + INT.format(META.live_count) + '</span></td>' +
+      '<td class="num">' + mult(META.median_multiple_global) + '<span class="sub">' + mult(META.global_low) + ' \u2013 ' + mult(META.global_high) + '</span></td>' +
+      '<td class="num">' + INT.format(restRows) + '</td>' +
+      '<td class="num">' + INT.format(Math.round(bt.median_miss * 100)) + '%<span class="sub">' + INT.format(bt.tested) + ' tested</span></td></tr>';
+    el.calib.innerHTML = rowsHtml;
   }
 
   function renderLive() {
@@ -375,15 +457,20 @@
       return a.slug < b.slug ? -1 : 1;
     });
     el.livesub.textContent = INT.format(list.length) + ' protocols record a token, so the market prices them and the ' +
-      'board leaves them out. Each one\'s market cap over its TVL is exactly the ratio the medians above were ' +
-      'measured from, and the table is sorted by market cap.';
+      'board leaves them out. Each one\u2019s market cap over its TVL is a ratio the medians above were measured from, ' +
+      'and the model\u2019s figure beside it is the same product with this protocol left out of its own peer set. The ' +
+      'miss is the model minus the market, as a share of the market. Sorted by market cap.';
     el.liverows.innerHTML = list.map(function (l) {
       var ratio = l.tvl_usd > 0 ? l.mcap_usd / l.tvl_usd : null;
-      return '<tr><td class="mono">' + esc(l.symbol || '—') + '</td><td>' + esc(l.name) + '</td>' +
+      var missCls = !l.tested ? 'dash' : (Math.abs(l.miss) <= 0.5 ? 'pos' : (Math.abs(l.miss) <= 1 ? 'warn' : 'neg'));
+      return '<tr' + (l.tested ? '' : ' class="untested"') + '><td class="mono">' + esc(l.symbol || '\u2014') + '</td>' +
+        '<td>' + esc(l.name) + '</td>' +
         '<td><span class="chip">' + esc(l.category || 'unclassified') + '</span></td>' +
         '<td class="num">' + usdShort(l.tvl_usd) + '</td>' +
         '<td class="num">' + usd(l.mcap_usd) + '</td>' +
-        '<td class="num">' + (ratio === null ? '—' : D2.format(ratio)) + '</td></tr>';
+        '<td class="num">' + (ratio === null ? '\u2014' : mult(ratio)) + '</td>' +
+        '<td class="num">' + usdShort(l.implied_usd) + '</td>' +
+        '<td class="num ' + missCls + '">' + (l.tested ? signed(l.miss) : 'not scored') + '</td></tr>';
     }).join('');
   }
 
@@ -391,17 +478,18 @@
     el.prov.innerHTML =
       '<div><dt>Snapshot as of</dt><dd>' + esc(META.as_of) + '</dd></div>' +
       '<div><dt>Read at</dt><dd>' + esc(String(META.fetched_at || '').replace(/\.\d+Z$/, 'Z')) + '</dd></div>' +
-      '<div><dt>Floor</dt><dd>' + usd(META.floor_usd) + '</dd></div>' +
-      '<div><dt>Protocols</dt><dd>' + INT.format(META.protocols) + '</dd></div>';
+      '<div><dt>Floor</dt><dd>' + usd(META.floor_usd) + '</dd></div>';
     el.tiles.innerHTML =
-      '<dl class="tile"><dt>Candidates</dt><dd>' + INT.format(META.candidate_count) +
-        '<span class="sub">screened in, from ' + INT.format(META.protocols) + ' protocols</span></dd></dl>' +
-      '<dl class="tile"><dt>On the watchlist</dt><dd>' + INT.format(META.watchlist_count) +
-        '<span class="sub">every one of them present on the board</span></dd></dl>' +
-      '<dl class="tile hot"><dt>Total implied value</dt><dd>' + usdShort(META.total_implied_usd) +
+      '<dl class="tile"><dt>Screened in</dt><dd>' + INT.format(META.candidate_count) +
+        '<span class="sub">of ' + INT.format(META.protocols) + ' protocols the snapshot holds</span></dd></dl>' +
+      '<dl class="tile"><dt>Watchlist covered</dt><dd>' + INT.format(META.watchlist_count) + ' / ' + INT.format(META.watchlist_count) +
+        '<span class="sub">every slug the house kept is a row on the board</span></dd></dl>' +
+      '<dl class="tile hot"><dt>Board implied value</dt><dd>' + usdShort(META.total_implied_usd) +
         '<span class="sub">' + usd(META.total_implied_usd) + ' summed over the board</span></dd></dl>' +
-      '<dl class="tile"><dt>Median multiple</dt><dd>' + D2.format(META.median_multiple_global) +
-        '<span class="sub">mcap ÷ TVL over ' + INT.format(META.live_count) + ' live-token protocols</span></dd></dl>';
+      '<dl class="tile"><dt>Median multiple</dt><dd>' + mult(META.median_multiple_global) +
+        '<span class="sub">mcap \u00f7 TVL over ' + INT.format(META.measured) + ' measured ratios</span></dd></dl>' +
+      '<dl class="tile"><dt>Pairs ordered right</dt><dd>' + D1.format(TEST.concordance * 100) + '%' +
+        '<span class="sub">' + INT.format(TEST.pairs_right) + ' of ' + INT.format(TEST.pairs) + ' same-category pairs, tested out of sample</span></dd></dl>';
     el.footnote.textContent = 'Board built from the sealed snapshot of ' + META.as_of + ' (' +
       INT.format(META.protocols) + ' protocols, floor ' + usd(META.floor_usd) + '), read at ' + META.fetched_at +
       '. The multiples are measured on the ' + INT.format(META.live_count) + ' protocols in the snapshot that ' +
@@ -510,6 +598,10 @@
   /* ---------- the first draw ---------- */
 
   function start() {
+    var url = readURL();
+    VIEW = url.view === 'method' ? 'method' : 'board';
+    if (VIEW === 'method') document.body.classList.add('view-method');
+    renderViews();
     if (!ROWS.length) {
       document.querySelector('main').innerHTML =
         '<section class="wrap"><div class="empty"><p class="etitle">The board is empty</p>' +
@@ -517,7 +609,6 @@
         'board on every run, so an empty set here means the snapshot held nothing to screen.</p></div></section>';
       return;
     }
-    var url = readURL();
     if (url.q) setQuery(url.q);
     state.cat = url.cat && ROWS.some(function (r) { return r.category === url.cat; }) ? url.cat : '';
     state.chain = url.chain && ROWS.some(function (r) { return r.chains.indexOf(url.chain) >= 0; }) ? url.chain : '';
@@ -532,6 +623,7 @@
     renderControls();
     applyStateToControls();
     renderHeader();
+    renderModel();
     renderMethod();
     renderLive();
     renderBoard();

@@ -1,5 +1,6 @@
 # The entrypoint's output, wherever it is pointed: never part of the entry.
 out/
+out2/
 output/
 
 # The transcript bundle carries the sessions that built the entry: it stays off the tree.
